@@ -1,8 +1,8 @@
 """
 Detect duct areas from input.png using wall-gap-wall pattern scanning.
 
-Ducts = two parallel dark lines (1-3px walls) with a consistent gap (8-36px)
-between them, running in straight horizontal or vertical lines.
+Ducts = two parallel dark lines (1-3px walls) with a consistent white gap
+(8-36px) between them, running in straight horizontal or vertical lines.
 
 Strategy:
   1. Threshold darkest pixels (< 60) + dilate by 1px for anti-aliasing
@@ -10,6 +10,7 @@ Strategy:
   3. Scan every row for wall-gap-wall pattern → vertical duct votes
   4. Group votes by y-center (H) or x-center (V) into "bands"
   5. Split bands into continuous runs, filter by length and coverage
+  6. Verify each candidate: gap must be white (>200), not gray fill
 """
 
 import cv2
@@ -26,17 +27,19 @@ GAP_MAX = 36           # Max gap between parallel walls (px)
 WALL_MIN = 1           # Min wall thickness (px, after dilation)
 WALL_MAX = 8           # Max wall thickness (px, after dilation)
 MIN_VOTES = 15         # Min number of scan lines confirming a band
-MIN_RUN_LEN = 50       # Min continuous duct run length (px)
+MIN_RUN_LEN = 80       # Min continuous duct run length (px)
 MIN_COVERAGE = 0.25    # Min fraction of columns/rows with votes in a run
 RUN_GAP_BREAK = 20     # Gap in votes that splits a run
+WHITE_THRESH = 210     # Gap between walls must be brighter than this
 
 
 def _find_wall_gap_wall(line_data):
     """Find wall-gap-wall patterns in a 1D binary array (255=dark, 0=light).
-    Returns list of (start, end, gap_center, gap_size)."""
+
+    Both walls must have similar thickness (ratio < 3:1) to avoid matching
+    a thin duct wall against a thick building wall."""
     results = []
     n = len(line_data)
-    # Extract dark runs
     runs = []
     i = 0
     while i < n:
@@ -47,7 +50,6 @@ def _find_wall_gap_wall(line_data):
             runs.append((start, i, i - start))
         else:
             i += 1
-    # Check consecutive pairs
     for k in range(len(runs) - 1):
         s1, e1, w1 = runs[k]
         s2, e2, w2 = runs[k + 1]
@@ -55,12 +57,16 @@ def _find_wall_gap_wall(line_data):
         if (WALL_MIN <= w1 <= WALL_MAX and
             WALL_MIN <= w2 <= WALL_MAX and
             GAP_MIN <= gap <= GAP_MAX):
-            results.append((s1, e2, (e1 + s2) / 2, gap))
+            # Both walls should be similar thickness
+            thick = max(w1, w2)
+            thin = max(min(w1, w2), 1)
+            if thick / thin <= 3:
+                results.append((s1, e2, (e1 + s2) / 2, gap))
     return results
 
 
-def _build_bands(centers_dict, key_name):
-    """Group nearby center coordinates into bands."""
+def _build_bands(centers_dict):
+    """Group nearby center coordinates into bands (within 3px)."""
     keys = sorted(centers_dict.keys())
     bands = []
     current = None
@@ -77,15 +83,126 @@ def _build_bands(centers_dict, key_name):
     return bands
 
 
-def _extract_runs(band_points, pos_idx, wall1_idx, wall2_idx, gap_idx):
-    """Extract continuous duct runs from a band's vote points."""
-    positions = [p[pos_idx] for p in band_points]
+def _verify_white_gap(gray, x_s, x_e, y_t, y_b, orientation, strict=False):
+    """Verify the gap between detected walls is white (not gray fill/equipment).
+
+    Real ducts have a white gap (median > 190) in most cross-sections.
+    Elements like equipment, elbows, or text areas have gray fills.
+
+    For short runs (strict=True), require higher pass rate (70%) to
+    reduce false positives from equipment symbols and text labels."""
+    min_median = 190
+    pass_rate = 0.7 if strict else 0.5
+
+    if orientation == 'H':
+        n_checks = min(15, max(5, (x_e - x_s) // 10))
+        white_count = 0
+        total = 0
+        for i in range(n_checks):
+            x = x_s + (x_e - x_s) * (i + 1) // (n_checks + 1)
+            if x < 0 or x >= gray.shape[1]:
+                continue
+            col = gray[y_t:y_b, x]
+            if len(col) < 4:
+                continue
+            mid_start = len(col) // 4
+            mid_end = 3 * len(col) // 4
+            mid = col[mid_start:mid_end]
+            if len(mid) > 0:
+                total += 1
+                if np.median(mid) > min_median:
+                    white_count += 1
+        return total > 0 and white_count >= max(2, total * pass_rate)
+    else:
+        n_checks = min(15, max(5, (y_b - y_t) // 10))
+        white_count = 0
+        total = 0
+        for i in range(n_checks):
+            y = y_t + (y_b - y_t) * (i + 1) // (n_checks + 1)
+            if y < 0 or y >= gray.shape[0]:
+                continue
+            row = gray[y, x_s:x_e]
+            if len(row) < 4:
+                continue
+            mid_start = len(row) // 4
+            mid_end = 3 * len(row) // 4
+            mid = row[mid_start:mid_end]
+            if len(mid) > 0:
+                total += 1
+                if np.median(mid) > min_median:
+                    white_count += 1
+        return total > 0 and white_count >= max(2, total * pass_rate)
+
+
+def _split_inconsistent_run(run_pts, pos_idx, ws_idx, we_idx, gap_idx,
+                            gray, orientation):
+    """Split a long run with inconsistent wall positions into sub-runs
+    where wall positions are stable (std < 10)."""
+    if len(run_pts) < MIN_VOTES:
+        return []
+
+    # Use a sliding window: group consecutive points with similar wall positions
+    sub_runs = []
+    window_start = 0
+
+    while window_start < len(run_pts):
+        # Grow window while wall positions stay consistent
+        best_end = window_start + MIN_VOTES
+        if best_end > len(run_pts):
+            break
+
+        ref_ws = np.median([p[ws_idx] for p in run_pts[window_start:best_end]])
+        ref_we = np.median([p[we_idx] for p in run_pts[window_start:best_end]])
+
+        for j in range(best_end, len(run_pts)):
+            ws = run_pts[j][ws_idx]
+            we = run_pts[j][we_idx]
+            if abs(ws - ref_ws) > 10 or abs(we - ref_we) > 10:
+                break
+            best_end = j + 1
+
+        if best_end - window_start >= MIN_VOTES:
+            seg = run_pts[window_start:best_end]
+            r_start = seg[0][pos_idx]
+            r_end = seg[-1][pos_idx]
+            run_len = r_end - r_start
+
+            if run_len >= MIN_RUN_LEN:
+                seg_ws = [p[ws_idx] for p in seg]
+                seg_we = [p[we_idx] for p in seg]
+                coord_start = int(np.median(seg_ws))
+                coord_end = int(np.median(seg_we))
+                duct_width = coord_end - coord_start
+                avg_gap = np.median([p[gap_idx] for p in seg])
+                cov = len(seg) / max(run_len, 1)
+
+                if cov >= MIN_COVERAGE:
+                    strict = run_len < 100
+                    if orientation == 'H':
+                        ok = _verify_white_gap(gray, r_start, r_end,
+                                               coord_start, coord_end, 'H', strict)
+                    else:
+                        ok = _verify_white_gap(gray, coord_start, coord_end,
+                                               r_start, r_end, 'V', strict)
+                    if ok:
+                        sub_runs.append((r_start, r_end, coord_start, coord_end,
+                                        duct_width, avg_gap, cov))
+
+        window_start = best_end
+
+    return sub_runs
+
+
+def _extract_runs(band_points, positions_idx, wall_start_idx, wall_end_idx, gap_idx,
+                  gray, img_w, img_h, orientation):
+    """Extract continuous duct runs from a band, with verification."""
+    positions = [p[positions_idx] for p in band_points]
     if len(positions) < MIN_VOTES:
         return []
 
     gaps = [p[gap_idx] for p in band_points]
-    w1s = [p[wall1_idx] for p in band_points]
-    w2s = [p[wall2_idx] for p in band_points]
+    w1s = [p[wall_start_idx] for p in band_points]
+    w2s = [p[wall_end_idx] for p in band_points]
 
     avg_gap = np.median(gaps)
     coord_start = int(np.median(w1s))
@@ -113,6 +230,33 @@ def _extract_runs(band_points, pos_idx, wall1_idx, wall2_idx, gap_idx):
         run_coverage = run_votes / max(run_len, 1)
         if run_coverage < MIN_COVERAGE:
             continue
+
+        # Verify white gap (stricter for short runs which are more likely FP)
+        strict = run_len < 100
+        if orientation == 'H':
+            if not _verify_white_gap(gray, r_start, r_end, coord_start, coord_end, 'H', strict):
+                continue
+        else:
+            if not _verify_white_gap(gray, coord_start, coord_end, r_start, r_end, 'V', strict):
+                continue
+
+        # For long runs, check consistency of wall positions.
+        # If positions vary too much, split into consistent sub-runs.
+        if run_len > 200:
+            run_pts = sorted(
+                [p for p in band_points if r_start <= p[positions_idx] <= r_end],
+                key=lambda p: p[positions_idx])
+            if run_pts:
+                starts_arr = np.array([p[wall_start_idx] for p in run_pts])
+                ends_arr = np.array([p[wall_end_idx] for p in run_pts])
+                if np.std(starts_arr) > 40 or np.std(ends_arr) > 40:
+                    # Split into windows and find consistent sub-runs
+                    sub_runs = _split_inconsistent_run(
+                        run_pts, positions_idx, wall_start_idx, wall_end_idx,
+                        gap_idx, gray, orientation)
+                    results.extend(sub_runs)
+                    continue
+
         results.append((r_start, r_end, coord_start, coord_end,
                         duct_width, avg_gap, run_coverage))
     return results
@@ -150,15 +294,15 @@ def detect_duct_rects(img_path="input.png"):
             v_centers.setdefault(xc_r, []).append((y, x1, x2, gap))
 
     # Step 4: Group into bands and extract runs
-    h_bands = _build_bands(h_centers, 'y')
-    v_bands = _build_bands(v_centers, 'x')
+    h_bands = _build_bands(h_centers)
+    v_bands = _build_bands(v_centers)
 
     result = img.copy()
     ducts = []
 
     # Horizontal ducts
     for band in h_bands:
-        runs = _extract_runs(band['points'], 0, 1, 2, 3)
+        runs = _extract_runs(band['points'], 0, 1, 2, 3, gray, w, h, 'H')
         for x_start, x_end, y_top, y_bot, duct_w, gap, cov in runs:
             y_center = (y_top + y_bot) / 2
             length = x_end - x_start
@@ -179,7 +323,7 @@ def detect_duct_rects(img_path="input.png"):
 
     # Vertical ducts
     for band in v_bands:
-        runs = _extract_runs(band['points'], 0, 1, 2, 3)
+        runs = _extract_runs(band['points'], 0, 1, 2, 3, gray, w, h, 'V')
         for y_start, y_end, x_left, x_right, duct_w, gap, cov in runs:
             x_center = (x_left + x_right) / 2
             length = y_end - y_start
