@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+PyMuPDF
+Pillow
+numpy
+opencv-python-headless
+easyocr
+openai
+python-dotenv
+python-multipart
+jinja2

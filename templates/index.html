@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HVAC Duct Annotation System</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#1a1a2e;color:#eee;height:100vh;display:flex;flex-direction:column}
+.header{background:#16213e;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #0f3460}
+.header h1{font-size:17px;font-weight:600}
+.header h1 span{color:#4488FF}
+.upload-screen{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}
+.upload-zone{width:460px;height:220px;border:2px dashed #4488FF;border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:all .2s}
+.upload-zone:hover{border-color:#FF8C00;background:rgba(68,136,255,.05)}
+.upload-zone.dragover{border-color:#FF8C00;background:rgba(255,140,0,.1)}
+.upload-zone p{font-size:15px;color:#aaa;margin-top:8px}
+.upload-zone .sub{font-size:12px;color:#666;margin-top:4px}
+.btn{padding:9px 20px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:all .2s}
+.btn-primary{background:#4488FF;color:white}
+.btn-primary:hover{background:#3366DD}
+.btn-secondary{background:#333;color:#ccc;border:1px solid #555}
+.or{color:#555;font-size:12px}
+.loading{flex:1;display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px}
+.spinner{width:44px;height:44px;border:4px solid #333;border-top-color:#4488FF;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.annotation-view{flex:1;display:none;position:relative;overflow:hidden}
+.canvas-wrap{width:100%;height:100%;overflow:auto;cursor:crosshair}
+canvas{display:block;margin:0 auto}
+.legend{position:absolute;top:10px;right:10px;background:rgba(22,33,62,.95);border:1px solid #0f3460;border-radius:8px;padding:10px 14px;z-index:10;font-size:12px}
+.legend h3{font-size:11px;margin-bottom:6px;color:#888;text-transform:uppercase;letter-spacing:.5px}
+.legend-item{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.legend-dot{width:12px;height:12px;border-radius:2px}
+.tooltip{position:absolute;display:none;background:rgba(22,33,62,.97);border:1px solid #0f3460;border-radius:10px;padding:14px;z-index:20;min-width:240px;box-shadow:0 8px 28px rgba(0,0,0,.5);pointer-events:none}
+.tooltip .dim{font-size:20px;font-weight:700;margin-bottom:6px}
+.tooltip .row{font-size:12px;color:#aaa;margin-bottom:3px;display:flex;gap:6px}
+.tooltip .row b{color:#ddd;min-width:70px}
+.tooltip .badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:white}
+.tooltip .desc{font-size:11px;color:#777;margin-top:6px;border-top:1px solid #333;padding-top:6px}
+.info{position:absolute;bottom:10px;left:10px;background:rgba(22,33,62,.9);border:1px solid #0f3460;border-radius:8px;padding:8px 14px;z-index:10;font-size:11px;color:#888}
+.info .count{color:#4488FF;font-weight:600}
+.back-btn{position:absolute;top:10px;left:10px;z-index:10}
+input[type=file]{display:none}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>HVAC <span>Duct Annotation</span> System</h1>
+  <div style="font-size:11px;color:#555">OpenCV + Vision AI Detection</div>
+</div>
+
+<div class="upload-screen" id="uploadScreen">
+  <div class="upload-zone" id="uploadZone">
+    <svg width="40" height="40" fill="#4488FF" viewBox="0 0 24 24"><path d="M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M18,20H6V4H13V9H18V20M12,12L16,16H13.5V19H10.5V16H8L12,12Z"/></svg>
+    <p>Drop HVAC drawing here</p>
+    <div class="sub">PDF, PNG, or JPG</div>
+  </div>
+  <div class="or">OR</div>
+  <button class="btn btn-primary" id="demoBtn">Load Sample Drawing (testset2.pdf)</button>
+  <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg">
+</div>
+
+<div class="loading" id="loading">
+  <div class="spinner"></div>
+  <div style="color:#aaa;font-size:13px">Analyzing drawing with AI Vision...</div>
+  <div style="font-size:11px;color:#555">GPT-4o identifies ducts → CV refines coordinates (10-20 seconds)</div>
+</div>
+
+<div class="annotation-view" id="annotationView">
+  <button class="btn btn-secondary back-btn" id="backBtn">&#8592; New Upload</button>
+  <div class="legend">
+    <h3>Pressure Class</h3>
+    <div class="legend-item"><div class="legend-dot" style="background:#FF4444"></div> High</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#FF8C00"></div> Medium</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#4488FF"></div> Low</div>
+  </div>
+  <div class="canvas-wrap" id="canvasWrap"><canvas id="canvas"></canvas></div>
+  <div class="tooltip" id="tooltip"></div>
+  <div class="info"><span class="count" id="ductCount">0</span> ducts detected — click a highlighted line for details</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let drawImg=null, ducts=[], scale=1, hovered=null;
+
+// Upload
+$('uploadZone').onclick=()=>$('fileInput').click();
+$('uploadZone').ondragover=e=>{e.preventDefault();e.target.closest('.upload-zone').classList.add('dragover')};
+$('uploadZone').ondragleave=e=>e.target.closest('.upload-zone')?.classList.remove('dragover');
+$('uploadZone').ondrop=e=>{e.preventDefault();$('uploadZone').classList.remove('dragover');if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0])};
+$('fileInput').onchange=()=>{if($('fileInput').files[0])upload($('fileInput').files[0])};
+$('demoBtn').onclick=()=>{show('loading');fetch('/api/demo').then(r=>r.json()).then(onResult).catch(err=>{alert(err);show('uploadScreen')})};
+$('backBtn').onclick=()=>show('uploadScreen');
+
+function upload(f){
+  const ext=f.name.toLowerCase().split('.').pop();
+  if(!['pdf','png','jpg','jpeg'].includes(ext))return alert('PDF, PNG, or JPG only');
+  show('loading');
+  const fd=new FormData();fd.append('file',f);
+  fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json()).then(onResult).catch(err=>{alert(err);show('uploadScreen')});
+}
+function show(id){['uploadScreen','loading','annotationView'].forEach(s=>$(s).style.display=s===id?(s==='annotationView'?'block':'flex'):'none')}
+
+// Result
+function onResult(data){
+  ducts=data.ducts;
+  $('ductCount').textContent=ducts.length;
+  const img=new Image();
+  img.onload=()=>{drawImg=img;show('annotationView');initCanvas()};
+  img.src=data.image_url;
+}
+
+function initCanvas(){
+  const c=$('canvas'),wrap=$('canvasWrap');
+  scale=Math.min(wrap.clientWidth/drawImg.width,wrap.clientHeight/drawImg.height);
+  c.width=drawImg.width*scale;c.height=drawImg.height*scale;
+  draw();
+  c.onmousemove=onMove;c.onclick=onClick;
+}
+
+function draw(){
+  const c=$('canvas'),ctx=c.getContext('2d');
+  ctx.drawImage(drawImg,0,0,c.width,c.height);
+  for(const d of ducts)drawDuct(ctx,d,hovered&&hovered.id===d.id);
+}
+
+function drawDuct(ctx,d,hover){
+  const pts=d.coordinates;if(pts.length<2)return;
+  ctx.save();
+  // Line — thin by default, thicker on hover
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x*scale,pts[0].y*scale);
+  for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x*scale,pts[i].y*scale);
+  ctx.strokeStyle=d.color;
+  ctx.lineWidth=hover?4:2;
+  ctx.globalAlpha=hover?.95:.6;
+  ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.stroke();
+  // Glow only on hover
+  if(hover){ctx.shadowColor=d.color;ctx.shadowBlur=10;ctx.globalAlpha=.4;ctx.stroke();ctx.shadowBlur=0;}
+  ctx.restore();
+}
+
+// Hit detect
+function ptToSeg(px,py,ax,ay,bx,by){const dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;if(!l2)return Math.hypot(px-ax,py-ay);let t=((px-ax)*dx+(py-ay)*dy)/l2;t=Math.max(0,Math.min(1,t));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
+function distToDuct(x,y,d){let m=Infinity;const p=d.coordinates;for(let i=0;i<p.length-1;i++)m=Math.min(m,ptToSeg(x,y,p[i].x*scale,p[i].y*scale,p[i+1].x*scale,p[i+1].y*scale));return m}
+function findDuct(x,y){let best=null,bd=18;for(const d of ducts){const dist=distToDuct(x,y,d);if(dist<bd){bd=dist;best=d}}return best}
+
+function onMove(e){const r=e.target.getBoundingClientRect();const d=findDuct(e.clientX-r.left,e.clientY-r.top);if(d!==hovered){hovered=d;e.target.style.cursor=d?'pointer':'crosshair';draw()}}
+
+function onClick(e){
+  const r=e.target.getBoundingClientRect();
+  const d=findDuct(e.clientX-r.left,e.clientY-r.top);
+  if(d)showTip(d,e.clientX,e.clientY);else $('tooltip').style.display='none';
+}
+
+function showTip(d,cx,cy){
+  const t=$('tooltip');
+  const pLbl={high:'High Pressure',medium:'Medium Pressure',low:'Low Pressure'};
+  const tLbl={supply:'Supply Air',return:'Return Air',exhaust:'Exhaust',grease:'Grease Exhaust'};
+  t.innerHTML=`
+    <div class="dim" style="color:${d.color}">${d.dimension}</div>
+    <div class="row"><b>Type:</b> ${tLbl[d.duct_type]||d.duct_type}</div>
+    <div class="row"><b>Pressure:</b> <span class="badge" style="background:${d.color}">${pLbl[d.pressure_class]}</span></div>
+    ${d.description?`<div class="desc">${d.description}</div>`:''}
+  `;
+  t.style.display='block';
+  let tx=cx+14,ty=cy-16;
+  if(tx+260>innerWidth)tx=cx-270;
+  if(ty+160>innerHeight)ty=cy-160;
+  if(ty<0)ty=8;
+  t.style.left=tx+'px';t.style.top=ty+'px';
+}
+document.onclick=e=>{if(!e.target.closest('#canvas'))$('tooltip').style.display='none'};
+</script>
+</body>
+</html>
