@@ -29,10 +29,17 @@ PRESSURE_COLORS = {"high": "#FF4444", "medium": "#FF8C00", "low": "#4488FF"}
 
 IMAGE_EDIT_PROMPT = (
     "This is an HVAC mechanical floor plan. "
-    "Identify ALL duct channels (the rectangular/round air channels shown as two parallel lines with gray fill between them). "
-    "Fill/highlight ONLY the duct channels with bright red color (RGB 255,0,0). "
-    "Do NOT highlight walls, equipment, text, symbols, diffusers, or anything else. "
-    "Only the duct airway channels that carry air between equipment and diffusers."
+    "Identify ALL duct channels — the straight rectangular/round air channels shown as two parallel lines. "
+    "Ducts run in straight lines: horizontally, vertically, or at an angle.\n\n"
+    "For each duct, draw a THIN 1-pixel centerline through the middle of the duct channel, colored by pressure class:\n"
+    "- RED line for HIGH pressure ducts (18 inches or larger)\n"
+    "- ORANGE line for MEDIUM pressure ducts (12 to 17 inches)\n"
+    "- BLUE line for LOW pressure ducts (smaller than 12 inches)\n"
+    "- If dimension is unreadable, use BLUE.\n\n"
+    "Also write the duct dimension in small text near each duct (e.g. 14\"⌀, 12\"x8\"). Keep text small so it doesn't obscure the drawing.\n\n"
+    "IMPORTANT: Only mark DUCTS — the straight air channels between equipment and diffusers. "
+    "Do NOT mark pipes, connectors, fittings, elbows, dampers, equipment outlines, walls, text, or symbols. "
+    "Only the straight duct runs."
 )
 
 GRID_COLS = 8
@@ -70,20 +77,16 @@ def detect_ducts(file_path: str, dpi: int = 200) -> tuple[np.ndarray, int, int, 
 
 # ── Main Pipeline: GPT Image Edit + CV Extraction ────────────────────────────
 
-def _pipeline_image_edit(full_img: np.ndarray, crop_h: int, file_path: str, dpi: int) -> tuple[np.ndarray, list[dict]] | None:
-    """Send to GPT image edit, return the annotated image directly."""
+def _pipeline_image_edit(full_img: np.ndarray, crop_h: int, file_path: str, dpi: int) -> np.ndarray | None:
+    """Send to GPT image edit, return annotated image with colored ducts + labels."""
     drawing = full_img[:crop_h]
 
     annotated = _get_annotated_image(drawing)
     if annotated is None:
         return None
 
-    # Resize annotated image to match full image dimensions
+    # Place annotated image into full-size canvas (with title block from original)
     h, w = full_img.shape[:2]
-    ah, aw = annotated.shape[:2]
-
-    # Place annotated image into a full-size canvas
-    # The annotated image covers the cropped drawing area
     result = full_img.copy()
     resized = cv2.resize(annotated, (w, crop_h), interpolation=cv2.INTER_LANCZOS4)
     result[:crop_h] = resized
