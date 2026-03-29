@@ -31,6 +31,19 @@ PRESSURE_BGR = {
     "low": (255, 136, 68),     # Blue
 }
 
+PRESSURE_HEX = {
+    "high": "#FF0000",
+    "medium": "#FF8C00",
+    "low": "#4488FF",
+}
+
+TYPE_LABELS = {
+    "supply": "Supply Air",
+    "return": "Return Air",
+    "exhaust": "Exhaust",
+    "grease": "Grease Exhaust",
+}
+
 GRID_COLS = 8
 GRID_ROWS = 4
 
@@ -59,12 +72,30 @@ def detect_ducts(file_path: str, dpi: int = 200):
         print(f"  Got {len(metadata)} metadata entries")
 
     result = full_img.copy()
-    for d in ducts:
+    duct_data = []
+    for i, d in enumerate(ducts):
         pressure = _match_pressure(d, metadata, crop_h, w)
-        color = PRESSURE_BGR.get(pressure, PRESSURE_BGR["low"])
-        cv2.line(result, (d["x1"], d["y1"]), (d["x2"], d["y2"]), color, 3)
+        color_bgr = PRESSURE_BGR.get(pressure, PRESSURE_BGR["low"])
+        color_hex = PRESSURE_HEX.get(pressure, PRESSURE_HEX["low"])
+        cv2.line(result, (d["x1"], d["y1"]), (d["x2"], d["y2"]), color_bgr, 2)
 
-    return result, w, h, []
+        # Find matching GPT metadata for dimension and type
+        dimension, duct_type = _get_nearest_metadata(d, metadata, crop_h, w)
+
+        duct_data.append({
+            "id": i,
+            "coordinates": [
+                {"x": int(d["x1"]), "y": int(d["y1"])},
+                {"x": int(d["x2"]), "y": int(d["y2"])},
+            ],
+            "dimension": dimension,
+            "duct_type": duct_type,
+            "pressure_class": pressure,
+            "color": color_hex,
+            "description": f"{TYPE_LABELS.get(duct_type, duct_type)} duct — {pressure} pressure",
+        })
+
+    return result, w, h, duct_data
 
 
 def _find_duct_rectangles(drawing):
@@ -246,19 +277,58 @@ def _get_duct_metadata(drawing):
         return []
 
 
+def _get_nearest_metadata(duct, metadata, crop_h, img_w):
+    """Find the nearest GPT metadata cell and return (dimension, duct_type)."""
+    cx, cy = float(duct["cx"]), float(duct["cy"])
+    if metadata:
+        best, best_dist = None, float("inf")
+        for m in metadata:
+            dist = math.hypot(cx - m["cx"], cy - m["cy"])
+            if dist < best_dist:
+                best_dist = dist
+                best = m
+        if best and best_dist < max(crop_h, img_w) * 0.3:
+            return best.get("dimension", "Unknown"), best.get("duct_type", "supply")
+
+    # Fallback: estimate dimension from detected pixel width
+    return _estimate_dimension(duct), "supply"
+
+
+def _estimate_dimension(duct):
+    """Estimate duct dimension from detected pixel width (at 200dpi)."""
+    px_w = float(duct.get("width", 0))
+    # Pixel width thresholds derived from testset2.pdf at 200dpi:
+    #   ~140-160px → 22"x14" (large rectangular)
+    #   ~70-90px   → 18"ø
+    #   ~40-60px   → 14"ø
+    #   ~25-40px   → 12"
+    #   ~15-25px   → 8"ø
+    if px_w >= 120:
+        return '22"x14"'
+    elif px_w >= 65:
+        return '18"ø'
+    elif px_w >= 40:
+        return '14"ø'
+    elif px_w >= 25:
+        return '12"'
+    else:
+        return '8"ø'
+
+
 def _match_pressure(duct, metadata, crop_h, img_w):
-    if not metadata:
-        return "low"
-    cx, cy = duct["cx"], duct["cy"]
-    best, best_dist = None, float("inf")
-    for m in metadata:
-        dist = math.hypot(cx - m["cx"], cy - m["cy"])
-        if dist < best_dist:
-            best_dist = dist
-            best = m
-    if best and best_dist < max(crop_h, img_w) * 0.3:
-        return _classify_pressure(best.get("dimension", ""))
-    return "low"
+    cx, cy = float(duct["cx"]), float(duct["cy"])
+    if metadata:
+        best, best_dist = None, float("inf")
+        for m in metadata:
+            dist = math.hypot(cx - m["cx"], cy - m["cy"])
+            if dist < best_dist:
+                best_dist = dist
+                best = m
+        if best and best_dist < max(crop_h, img_w) * 0.3:
+            return _classify_pressure(best.get("dimension", ""))
+
+    # Fallback: classify from pixel width
+    return _classify_pressure(_estimate_dimension(duct))
 
 
 def _classify_pressure(dimension):

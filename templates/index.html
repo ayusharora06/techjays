@@ -132,8 +132,8 @@ function drawDuct(ctx,d,hover){
   ctx.moveTo(pts[0].x*scale,pts[0].y*scale);
   for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x*scale,pts[i].y*scale);
   ctx.strokeStyle=d.color;
-  ctx.lineWidth=hover?4:2;
-  ctx.globalAlpha=hover?.95:.6;
+  ctx.lineWidth=hover?3:2;
+  ctx.globalAlpha=hover?.95:.7;
   ctx.lineCap='round';ctx.lineJoin='round';
   ctx.stroke();
   // Glow only on hover
