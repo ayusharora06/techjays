@@ -111,8 +111,24 @@ def _find_duct_rectangles(drawing):
             if aspect < 2.5 or rh < 10 or rh > 160 or rw < 80:
                 continue
 
-            # Centerline endpoints — use boundingRect, shrink by 10% each end
+            # Reject slanted contours — angle must be near 0° or 90°
+            # minAreaRect angle after our rw/rh swap is near 0 for H, near 90 for V
+            norm_angle = angle % 180
+            if orient == "H" and not (norm_angle < 15 or norm_angle > 165):
+                continue
+            if orient == "V" and not (75 < norm_angle < 105):
+                continue
+
+            # Also check: boundingRect area vs contour area ratio
+            # Slanted shapes have large bounding rect relative to actual area
             bx, by, bbw, bbh = cv2.boundingRect(cnt)
+            bbox_area = bbw * bbh
+            cnt_area = cv2.contourArea(cnt)
+            fill_ratio = cnt_area / max(bbox_area, 1)
+            if fill_ratio < 0.4:  # slanted contours fill < 40% of bounding rect
+                continue
+
+            # Centerline endpoints — use boundingRect, shrink by 10% each end
             shrink = 0.10
             if orient == "H":
                 margin = int(bbw * shrink)
