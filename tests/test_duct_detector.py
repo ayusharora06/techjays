@@ -11,6 +11,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from duct_detector import (
+    DuctDetectorConfig,
+    DEFAULT_CONFIG,
     _classify_pressure,
     _estimate_dimension,
     _parse_json_response,

@@ -89,15 +89,29 @@ $('uploadZone').ondragover=e=>{e.preventDefault();e.target.closest('.upload-zone
 $('uploadZone').ondragleave=e=>e.target.closest('.upload-zone')?.classList.remove('dragover');
 $('uploadZone').ondrop=e=>{e.preventDefault();$('uploadZone').classList.remove('dragover');if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0])};
 $('fileInput').onchange=()=>{if($('fileInput').files[0])upload($('fileInput').files[0])};
-$('demoBtn').onclick=()=>{show('loading');fetch('/api/demo').then(r=>r.json()).then(onResult).catch(err=>{alert(err);show('uploadScreen')})};
+$('demoBtn').onclick=()=>{show('loading');apiCall('/api/demo')};
 $('backBtn').onclick=()=>show('uploadScreen');
+
+function apiCall(url,opts){
+  const ctrl=new AbortController();
+  const tid=setTimeout(()=>ctrl.abort(),120000);
+  fetch(url,{...opts,signal:ctrl.signal})
+    .then(r=>{if(!r.ok)return r.json().then(d=>{throw new Error(d.detail||r.statusText)});return r.json()})
+    .then(onResult)
+    .catch(err=>{
+      const msg=err.name==='AbortError'?'Request timed out':err.message||'Unknown error';
+      alert('Error: '+msg);show('uploadScreen');
+    })
+    .finally(()=>clearTimeout(tid));
+}
 
 function upload(f){
   const ext=f.name.toLowerCase().split('.').pop();
   if(!['pdf','png','jpg','jpeg'].includes(ext))return alert('PDF, PNG, or JPG only');
+  if(f.size>50*1024*1024)return alert('File too large. Max 50MB.');
   show('loading');
   const fd=new FormData();fd.append('file',f);
-  fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json()).then(onResult).catch(err=>{alert(err);show('uploadScreen')});
+  apiCall('/api/upload',{method:'POST',body:fd});
 }
 function show(id){['uploadScreen','loading','annotationView'].forEach(s=>$(s).style.display=s===id?(s==='annotationView'?'block':'flex'):'none')}
 
